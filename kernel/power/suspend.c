@@ -178,6 +178,8 @@ static int suspend_enter(suspend_state_t state)
 		if (!(suspend_test(TEST_CORE) || pm_wakeup_pending())) {
 			error = suspend_ops->enter(state);
 			events_check_enabled = false;
+		} else if (*wakeup) {
+			error = -EBUSY;
 		}
 		syscore_resume();
 	}
