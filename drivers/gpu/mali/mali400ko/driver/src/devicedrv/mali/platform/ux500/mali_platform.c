@@ -40,7 +40,7 @@
 #define MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT 64
 #define MALI_LOW_TO_HIGH_LEVEL_UTILIZATION_LIMIT 192
 
-#define MALI_UX500_VERSION		"1.0.2"
+#define MALI_UX500_VERSION		"1.0.1"
 
 #define MALI_MAX_UTILIZATION		256
 
@@ -48,7 +48,7 @@
 #define PRCMU_PLLSOC0			0x0080
 
 #define PRCMU_SGACLK_INIT		0x00000021
-#define PRCMU_PLLSOC0_INIT		0x00050134
+#define PRCMU_PLLSOC0_INIT		0x01050168
 
 #define AB8500_VAPE_SEL1 		0x0E
 #define AB8500_VAPE_SEL2	 	0x0F
@@ -57,7 +57,7 @@
 #define AB8500_VAPE_MAX_UV		1487500
 
 #define MALI_CLOCK_DEFLO		399360
-#define MALI_CLOCK_DEFHI		499200
+#define MALI_CLOCK_DEFHI		399360
 
 struct mali_dvfs_data
 {
@@ -67,20 +67,32 @@ struct mali_dvfs_data
 };
 
 static struct mali_dvfs_data mali_dvfs[] = {
-	{122880, 0x00050110, 0x20},
-	{184320, 0x00050118, 0x20},
-	{245760, 0x00050120, 0x20},
-	{307200, 0x00050128, 0x20},
-	{360960, 0x0005012f, 0x20},
-	{399360, 0x00050134, 0x20},
-	{445440, 0x0005013a, 0x20},
-	{499200, 0x00050141, 0x2B},
-	{545280, 0x00050147, 0x2D},
-	{606720, 0x0005014f, 0x32},
-	{668160, 0x00050157, 0x3F},
-	{729600, 0x0005015f, 0x3F},
-	{783360, 0x00050166, 0x3F},
-	{806400, 0x00050169, 0x3F},
+	{192000, 0x0101010A, 0x20},
+	{256000, 0x01030128, 0x20},
+	{299520, 0x0105014E, 0x20},
+	{320000, 0x01030132, 0x20},
+	{360000, 0x0105015E, 0x20},
+	{399360, 0x01050168, 0x20},
+	{422400, 0x01010116, 0x26},
+	{441600, 0x0102012E, 0x26},
+	{460800, 0x01010118, 0x29},
+	{480000, 0x01020132, 0x2A},
+	{499200, 0x0101011A, 0x2B},
+	{518400, 0x01020136, 0x2C},
+	{537600, 0x0101011C, 0x2D},
+	{560640, 0x01050192, 0x2F},
+	{579840, 0x01050197, 0x30},
+	{600000, 0x0104017D, 0x32},
+	{619200, 0x01040181, 0x33},
+	{640000, 0x01030164, 0x34},
+	{660480, 0x010501AC, 0x3F},
+	{679680, 0x010501B1, 0x3F},
+	{700800, 0x01040192, 0x3F},
+	{715200, 0x01040195, 0x3F},
+	{720000, 0x01040196, 0x3F},
+	{729600, 0x01010126, 0x3F},
+	{737280, 0x010501C0, 0x3F},
+	{752640, 0x010501C4, 0x3F},
 };
 
 int mali_utilization_high_to_low = MALI_HIGH_TO_LOW_LEVEL_UTILIZATION_LIMIT;
@@ -89,7 +101,9 @@ int mali_utilization_low_to_high = MALI_LOW_TO_HIGH_LEVEL_UTILIZATION_LIMIT;
 static bool is_running;
 static bool is_initialized;
 
-static u32 mali_last_utilization;
+u32 mali_last_utilization;
+EXPORT_SYMBOL(mali_last_utilization);
+
 module_param(mali_last_utilization, uint, 0444);
 
 static struct regulator *regulator;
@@ -101,15 +115,16 @@ static struct workqueue_struct *mali_utilization_workqueue;
 static struct wake_lock wakelock;
 #endif
 
-static u32 boost_enable 	= 1;
-static u32 boost_working 	= 0;
-static u32 boost_scheduled 	= 0;
-static u32 boost_required 	= 0;
-static u32 boost_delay 		= 200;
-static u32 boost_low 		= 0;
-static u32 boost_high 		= 0;
-static u32 boost_upthreshold 	= 233;
-static u32 boost_downthreshold 	= 64;
+static u32 boost_enable			 	= 1;
+       u32 boost_working		 	= 0;
+static u32 boost_scheduled		 	= 0;
+static u32 boost_required		 	= 0;
+static u32 __read_mostly boost_delay 		= 0;
+static u32 boost_low		 		= 0;
+static u32 boost_high		 		= 0;
+       u32 __read_mostly boost_upthreshold 	= 233;
+       u32 __read_mostly boost_downthreshold 	= 64;
+
 //mutex to protect above variables
 static DEFINE_MUTEX(mali_boost_lock);
 
@@ -397,6 +412,11 @@ void mali_utilization_function(struct work_struct *ptr)
 	
 }
 
+int get_mali_workload(void)
+{
+	return mali_last_utilization * sgaclk_freq() / 256; 
+}
+
 #define ATTR_RO(_name)	\
 	static struct kobj_attribute _name##_interface = __ATTR(_name, 0444, _name##_show, NULL);
 
@@ -507,7 +527,11 @@ ATTR_RW(mali_gpu_fullspeed);
 
 static ssize_t mali_gpu_load_show(struct kobject *kobj, struct kobj_attribute *attr, char *buf)
 {
-	return sprintf(buf, "%d (%d%%)\n", mali_last_utilization, mali_last_utilization * 100 / 256);
+	sprintf(buf, "load=%d (%d%%)\nworkload=%d\n", mali_last_utilization, 
+		mali_last_utilization * 100 / 256,
+		get_mali_workload());
+	
+	return strlen(buf);
 }
 ATTR_RO(mali_gpu_load);
 
@@ -699,6 +723,18 @@ static ssize_t mali_dvfs_config_store(struct kobject *kobj, struct kobj_attribut
 
 	if (sscanf(buf, "%u pll=%x", &idx, &val) == 2) {
 		mali_dvfs[idx].clkpll = val;
+
+		return count;
+	}
+
+	if (sscanf(buf, "%u vape-=%d", &idx, &val) == 2) {
+		mali_dvfs[idx].vape_raw -= val;
+
+		return count;
+	}
+	
+	if (sscanf(buf, "%u vape+=%d", &idx, &val) == 2) {
+		mali_dvfs[idx].vape_raw += val;
 
 		return count;
 	}
