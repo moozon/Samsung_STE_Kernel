@@ -32,6 +32,9 @@
 
 #include <trace/events/power.h>
 
+#define U8500_SAFE_CPU_BOOT_SPEED_MIN	 200000
+#define U8500_SAFE_CPU_BOOT_SPEED_MAX	1150000
+
 /**
  * The "cpufreq driver" - the arch- or hardware-dependent low
  * level driver of CPUFreq support, and its spinlock. This lock
@@ -972,6 +975,13 @@ static int cpufreq_add_dev(struct sys_device *sys_dev)
 		pr_debug("initialization failed\n");
 		goto err_unlock_policy;
 	}
+
+	if (policy->min < U8500_SAFE_CPU_BOOT_SPEED_MIN) 
+		policy->min = U8500_SAFE_CPU_BOOT_SPEED_MIN;
+
+	if (policy->max > U8500_SAFE_CPU_BOOT_SPEED_MAX) 
+		policy->max = U8500_SAFE_CPU_BOOT_SPEED_MAX;
+
 	policy->user_policy.min = policy->min;
 	policy->user_policy.max = policy->max;
 
