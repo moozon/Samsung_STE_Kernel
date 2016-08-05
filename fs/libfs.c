@@ -16,8 +16,6 @@
 
 #include <asm/uaccess.h>
 
-#include "internal.h"
-
 static inline int simple_positive(struct dentry *dentry)
 {
 	return dentry->d_inode && !d_unhashed(dentry);
@@ -248,11 +246,13 @@ struct dentry *mount_pseudo(struct file_system_type *fs_type, char *name,
 	root->i_ino = 1;
 	root->i_mode = S_IFDIR | S_IRUSR | S_IWUSR;
 	root->i_atime = root->i_mtime = root->i_ctime = CURRENT_TIME;
-	dentry = __d_alloc(s, &d_name);
+	dentry = d_alloc(NULL, &d_name);
 	if (!dentry) {
 		iput(root);
 		goto Enomem;
 	}
+	dentry->d_sb = s;
+	dentry->d_parent = dentry;
 	d_instantiate(dentry, root);
 	s->s_root = dentry;
 	s->s_d_op = dops;
@@ -488,7 +488,7 @@ int simple_fill_super(struct super_block *s, unsigned long magic,
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	inode->i_op = &simple_dir_inode_operations;
 	inode->i_fop = &simple_dir_operations;
-	set_nlink(inode, 2);
+	inode->i_nlink = 2;
 	root = d_alloc_root(inode);
 	if (!root) {
 		iput(inode);
@@ -905,29 +905,21 @@ EXPORT_SYMBOL_GPL(generic_fh_to_parent);
  * filesystems which track all non-inode metadata in the buffers list
  * hanging off the address_space structure.
  */
-int generic_file_fsync(struct file *file, loff_t start, loff_t end,
-		       int datasync)
+int generic_file_fsync(struct file *file, int datasync)
 {
 	struct inode *inode = file->f_mapping->host;
 	int err;
 	int ret;
 
-	err = filemap_write_and_wait_range(inode->i_mapping, start, end);
-	if (err)
-		return err;
-
-	mutex_lock(&inode->i_mutex);
 	ret = sync_mapping_buffers(inode->i_mapping);
 	if (!(inode->i_state & I_DIRTY))
-		goto out;
+		return ret;
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))
-		goto out;
+		return ret;
 
 	err = sync_inode_metadata(inode, 1);
 	if (ret == 0)
 		ret = err;
-out:
-	mutex_unlock(&inode->i_mutex);
 	return ret;
 }
 EXPORT_SYMBOL(generic_file_fsync);
@@ -964,7 +956,7 @@ EXPORT_SYMBOL(generic_check_addressable);
 /*
  * No-op implementation of ->fsync for in-memory filesystems.
  */
-int noop_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+int noop_fsync(struct file *file, int datasync)
 {
 	return 0;
 }

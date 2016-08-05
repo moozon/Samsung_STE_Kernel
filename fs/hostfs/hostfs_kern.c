@@ -362,20 +362,9 @@ retry:
 	return 0;
 }
 
-int hostfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+int hostfs_fsync(struct file *file, int datasync)
 {
-	struct inode *inode = file->f_mapping->host;
-	int ret;
-
-	ret = filemap_write_and_wait_range(inode->i_mapping, start, end);
-	if (ret)
-		return ret;
-
-	mutex_lock(&inode->i_mutex);
-	ret = fsync_file(HOSTFS_I(inode)->fd, datasync);
-	mutex_unlock(&inode->i_mutex);
-
-	return ret;
+	return fsync_file(HOSTFS_I(file->f_mapping->host)->fd, datasync);
 }
 
 static const struct file_operations hostfs_file_fops = {
@@ -541,7 +530,7 @@ static int read_name(struct inode *ino, char *name)
 
 	ino->i_ino = st.ino;
 	ino->i_mode = st.mode;
-	set_nlink(ino, st.nlink);
+	ino->i_nlink = st.nlink;
 	ino->i_uid = st.uid;
 	ino->i_gid = st.gid;
 	ino->i_atime = st.atime;

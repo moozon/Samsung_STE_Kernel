@@ -417,12 +417,6 @@ void mnt_drop_write(struct vfsmount *mnt)
 }
 EXPORT_SYMBOL_GPL(mnt_drop_write);
 
-void mnt_drop_write_file(struct file *file)
-{
-	mnt_drop_write(file->f_path.mnt);
-}
-EXPORT_SYMBOL(mnt_drop_write_file);
-
 static int mnt_make_readonly(struct vfsmount *mnt)
 {
 	int ret = 0;
@@ -1224,7 +1218,7 @@ void release_mounts(struct list_head *head)
 	while (!list_empty(head)) {
 		mnt = list_first_entry(head, struct vfsmount, mnt_hash);
 		list_del_init(&mnt->mnt_hash);
-		if (mnt_has_parent(mnt)) {
+		if (mnt->mnt_parent != mnt) {
 			struct dentry *dentry;
 			struct vfsmount *m;
 
@@ -1265,7 +1259,7 @@ void umount_tree(struct vfsmount *mnt, int propagate, struct list_head *kill)
 			__mnt_make_shortterm(p);
 		p->mnt_ns = NULL;
 		list_del_init(&p->mnt_child);
-		if (mnt_has_parent(p)) {
+		if (p->mnt_parent != p) {
 			p->mnt_parent->mnt_ghosts++;
 			dentry_reset_mounted(p->mnt_parent, p->mnt_mountpoint);
 		}
@@ -1494,14 +1488,8 @@ struct vfsmount *collect_mounts(struct path *path)
 {
 	struct vfsmount *tree;
 	down_write(&namespace_sem);
-	if (!check_mnt(path->mnt))
-		tree = ERR_PTR(-EINVAL);
-	else
-		tree = copy_tree(path->mnt, path->dentry,
-				 CL_COPY_ALL | CL_PRIVATE);
+	tree = copy_tree(path->mnt, path->dentry, CL_COPY_ALL | CL_PRIVATE);
 	up_write(&namespace_sem);
-	if (IS_ERR(tree))
-		return NULL;
 	return tree;
 }
 
@@ -1916,7 +1904,7 @@ static int do_move_mount(struct path *path, char *old_name)
 	if (old_path.dentry != old_path.mnt->mnt_root)
 		goto out1;
 
-	if (!mnt_has_parent(old_path.mnt))
+	if (old_path.mnt == old_path.mnt->mnt_parent)
 		goto out1;
 
 	if (S_ISDIR(path->dentry->d_inode->i_mode) !=
@@ -1925,7 +1913,8 @@ static int do_move_mount(struct path *path, char *old_name)
 	/*
 	 * Don't move a mount residing in a shared parent.
 	 */
-	if (IS_MNT_SHARED(old_path.mnt->mnt_parent))
+	if (old_path.mnt->mnt_parent &&
+	    IS_MNT_SHARED(old_path.mnt->mnt_parent))
 		goto out1;
 	/*
 	 * Don't move a mount tree containing unbindable mounts to a destination
@@ -1935,7 +1924,7 @@ static int do_move_mount(struct path *path, char *old_name)
 	    tree_contains_unbindable(old_path.mnt))
 		goto out1;
 	err = -ELOOP;
-	for (p = path->mnt; mnt_has_parent(p); p = p->mnt_parent)
+	for (p = path->mnt; p->mnt_parent != p; p = p->mnt_parent)
 		if (p == old_path.mnt)
 			goto out1;
 
@@ -1978,7 +1967,7 @@ static struct vfsmount *fs_set_subtype(struct vfsmount *mnt, const char *fstype)
 	return ERR_PTR(err);
 }
 
-static struct vfsmount *
+struct vfsmount *
 do_kern_mount(const char *fstype, int flags, const char *name, void *data)
 {
 	struct file_system_type *type = get_fs_type(fstype);
@@ -1992,6 +1981,7 @@ do_kern_mount(const char *fstype, int flags, const char *name, void *data)
 	put_filesystem(type);
 	return mnt;
 }
+EXPORT_SYMBOL_GPL(do_kern_mount);
 
 /*
  * add a mount into a namespace's mount tree
@@ -2549,31 +2539,6 @@ out_type:
 }
 
 /*
- * Return true if path is reachable from root
- *
- * namespace_sem or vfsmount_lock is held
- */
-bool is_path_reachable(struct vfsmount *mnt, struct dentry *dentry,
-			 const struct path *root)
-{
-	while (mnt != root->mnt && mnt_has_parent(mnt)) {
-		dentry = mnt->mnt_mountpoint;
-		mnt = mnt->mnt_parent;
-	}
-	return mnt == root->mnt && is_subdir(dentry, root->dentry);
-}
-
-int path_is_under(struct path *path1, struct path *path2)
-{
-	int res;
-	br_read_lock(vfsmount_lock);
-	res = is_path_reachable(path1->mnt, path1->dentry, path2);
-	br_read_unlock(vfsmount_lock);
-	return res;
-}
-EXPORT_SYMBOL(path_is_under);
-
-/*
  * pivot_root Semantics:
  * Moves the root file system of the current process to the directory put_old,
  * makes new_root as the new root file system of the current process, and sets
@@ -2601,6 +2566,7 @@ EXPORT_SYMBOL(path_is_under);
 SYSCALL_DEFINE2(pivot_root, const char __user *, new_root,
 		const char __user *, put_old)
 {
+	struct vfsmount *tmp;
 	struct path new, old, parent_path, root_parent, root;
 	int error;
 
@@ -2643,17 +2609,25 @@ SYSCALL_DEFINE2(pivot_root, const char __user *, new_root,
 	error = -EINVAL;
 	if (root.mnt->mnt_root != root.dentry)
 		goto out4; /* not a mountpoint */
-	if (!mnt_has_parent(root.mnt))
+	if (root.mnt->mnt_parent == root.mnt)
 		goto out4; /* not attached */
 	if (new.mnt->mnt_root != new.dentry)
 		goto out4; /* not a mountpoint */
-	if (!mnt_has_parent(new.mnt))
+	if (new.mnt->mnt_parent == new.mnt)
 		goto out4; /* not attached */
 	/* make sure we can reach put_old from new_root */
-	if (!is_path_reachable(old.mnt, old.dentry, &new))
-		goto out4;
-	/* make certain new is below the root */
-	if (!is_path_reachable(new.mnt, new.dentry, &root))
+	tmp = old.mnt;
+	if (tmp != new.mnt) {
+		for (;;) {
+			if (tmp->mnt_parent == tmp)
+				goto out4; /* already mounted on put_old */
+			if (tmp->mnt_parent == new.mnt)
+				break;
+			tmp = tmp->mnt_parent;
+		}
+		if (!is_subdir(tmp->mnt_mountpoint, new.dentry))
+			goto out4;
+	} else if (!is_subdir(old.dentry, new.dentry))
 		goto out4;
 	br_write_lock(vfsmount_lock);
 	detach_mnt(new.mnt, &parent_path);

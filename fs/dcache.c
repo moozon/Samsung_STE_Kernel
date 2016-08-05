@@ -37,7 +37,6 @@
 #include <linux/rculist_bl.h>
 #include <linux/prefetch.h>
 #include "internal.h"
-#include "mount.h"
 
 /*
  * Usage:
@@ -1263,8 +1262,8 @@ static struct shrinker dcache_shrinker = {
 };
 
 /**
- * __d_alloc	-	allocate a dcache entry
- * @sb: filesystem it will belong to
+ * d_alloc	-	allocate a dcache entry
+ * @parent: parent of entry to allocate
  * @name: qstr of the name
  *
  * Allocates a dentry. It returns %NULL if there is insufficient memory
@@ -1272,7 +1271,7 @@ static struct shrinker dcache_shrinker = {
  * copied and the copy passed in may be reused after this call.
  */
  
-struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
+struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
 {
 	struct dentry *dentry;
 	char *dname;
@@ -1302,8 +1301,8 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	spin_lock_init(&dentry->d_lock);
 	seqcount_init(&dentry->d_seq);
 	dentry->d_inode = NULL;
-	dentry->d_parent = dentry;
-	dentry->d_sb = sb;
+	dentry->d_parent = NULL;
+	dentry->d_sb = NULL;
 	dentry->d_op = NULL;
 	dentry->d_fsdata = NULL;
 	INIT_HLIST_BL_NODE(&dentry->d_hash);
@@ -1311,37 +1310,22 @@ struct dentry *__d_alloc(struct super_block *sb, const struct qstr *name)
 	INIT_LIST_HEAD(&dentry->d_subdirs);
 	INIT_LIST_HEAD(&dentry->d_alias);
 	INIT_LIST_HEAD(&dentry->d_u.d_child);
-	d_set_d_op(dentry, dentry->d_sb->s_d_op);
+
+	if (parent) {
+		spin_lock(&parent->d_lock);
+		/*
+		 * don't need child lock because it is not subject
+		 * to concurrency here
+		 */
+		__dget_dlock(parent);
+		dentry->d_parent = parent;
+		dentry->d_sb = parent->d_sb;
+		d_set_d_op(dentry, dentry->d_sb->s_d_op);
+		list_add(&dentry->d_u.d_child, &parent->d_subdirs);
+		spin_unlock(&parent->d_lock);
+	}
 
 	this_cpu_inc(nr_dentry);
-
-	return dentry;
-}
-
-/**
- * d_alloc	-	allocate a dcache entry
- * @parent: parent of entry to allocate
- * @name: qstr of the name
- *
- * Allocates a dentry. It returns %NULL if there is insufficient memory
- * available. On a success the dentry is returned. The name passed in is
- * copied and the copy passed in may be reused after this call.
- */
-struct dentry *d_alloc(struct dentry * parent, const struct qstr *name)
-{
-	struct dentry *dentry = __d_alloc(parent->d_sb, name);
-	if (!dentry)
-		return NULL;
-
-	spin_lock(&parent->d_lock);
-	/*
-	 * don't need child lock because it is not subject
-	 * to concurrency here
-	 */
-	__dget_dlock(parent);
-	dentry->d_parent = parent;
-	list_add(&dentry->d_u.d_child, &parent->d_subdirs);
-	spin_unlock(&parent->d_lock);
 
 	return dentry;
 }
@@ -1349,9 +1333,13 @@ EXPORT_SYMBOL(d_alloc);
 
 struct dentry *d_alloc_pseudo(struct super_block *sb, const struct qstr *name)
 {
-	struct dentry *dentry = __d_alloc(sb, name);
-	if (dentry)
+	struct dentry *dentry = d_alloc(NULL, name);
+	if (dentry) {
+		dentry->d_sb = sb;
+		d_set_d_op(dentry, dentry->d_sb->s_d_op);
+		dentry->d_parent = dentry;
 		dentry->d_flags |= DCACHE_DISCONNECTED;
+	}
 	return dentry;
 }
 EXPORT_SYMBOL(d_alloc_pseudo);
@@ -1521,30 +1509,17 @@ struct dentry * d_alloc_root(struct inode * root_inode)
 	if (root_inode) {
 		static const struct qstr name = { .name = "/", .len = 1 };
 
-		res = __d_alloc(root_inode->i_sb, &name);
-		if (res)
+		res = d_alloc(NULL, &name);
+		if (res) {
+			res->d_sb = root_inode->i_sb;
+			d_set_d_op(res, res->d_sb->s_d_op);
+			res->d_parent = res;
 			d_instantiate(res, root_inode);
+		}
 	}
 	return res;
 }
 EXPORT_SYMBOL(d_alloc_root);
-
-struct dentry *d_make_root(struct inode *root_inode)
-{
-	struct dentry *res = NULL;
-
-	if (root_inode) {
-		static const struct qstr name = { .name = "/", .len = 1 };
-
-		res = __d_alloc(root_inode->i_sb, &name);
-		if (res)
-			d_instantiate(res, root_inode);
-		else
-			iput(root_inode);
-	}
-	return res;
-}
-EXPORT_SYMBOL(d_make_root);
 
 static struct dentry * __d_find_any_alias(struct inode *inode)
 {
@@ -1557,14 +1532,7 @@ static struct dentry * __d_find_any_alias(struct inode *inode)
 	return alias;
 }
 
-/**
- * d_find_any_alias - find any alias for a given inode
- * @inode: inode to find an alias for
- *
- * If any aliases exist for the given inode, take and return a
- * reference for one of them.  If no aliases exist, return %NULL.
- */
-struct dentry *d_find_any_alias(struct inode *inode)
+static struct dentry * d_find_any_alias(struct inode *inode)
 {
 	struct dentry *de;
 
@@ -1573,7 +1541,7 @@ struct dentry *d_find_any_alias(struct inode *inode)
 	spin_unlock(&inode->i_lock);
 	return de;
 }
-EXPORT_SYMBOL(d_find_any_alias);
+
 
 /**
  * d_obtain_alias - find or allocate a dentry for a given inode
@@ -1608,11 +1576,13 @@ struct dentry *d_obtain_alias(struct inode *inode)
 	if (res)
 		goto out_iput;
 
-	tmp = __d_alloc(inode->i_sb, &anonstring);
+	tmp = d_alloc(NULL, &anonstring);
 	if (!tmp) {
 		res = ERR_PTR(-ENOMEM);
 		goto out_iput;
 	}
+	tmp->d_parent = tmp; /* make sure dput doesn't croak */
+
 
 	spin_lock(&inode->i_lock);
 	res = __d_find_any_alias(inode);
@@ -1624,6 +1594,8 @@ struct dentry *d_obtain_alias(struct inode *inode)
 
 	/* attach a disconnected dentry */
 	spin_lock(&tmp->d_lock);
+	tmp->d_sb = inode->i_sb;
+	d_set_d_op(tmp, tmp->d_sb->s_d_op);
 	tmp->d_inode = inode;
 	tmp->d_flags |= DCACHE_DISCONNECTED;
 	list_add(&tmp->d_alias, &inode->i_dentry);
@@ -2547,8 +2519,9 @@ static int prepend_path(const struct path *path,
 
 		if (dentry == vfsmnt->mnt_root || IS_ROOT(dentry)) {
 			/* Global root? */
-			if (!mnt_has_parent(vfsmnt))
+			if (vfsmnt->mnt_parent == vfsmnt) {
 				goto global_root;
+			}
 			dentry = vfsmnt->mnt_mountpoint;
 			vfsmnt = vfsmnt->mnt_parent;
 			continue;
@@ -2938,6 +2911,31 @@ int is_subdir(struct dentry *new_dentry, struct dentry *old_dentry)
 
 	return result;
 }
+
+int path_is_under(struct path *path1, struct path *path2)
+{
+	struct vfsmount *mnt = path1->mnt;
+	struct dentry *dentry = path1->dentry;
+	int res;
+
+	br_read_lock(vfsmount_lock);
+	if (mnt != path2->mnt) {
+		for (;;) {
+			if (mnt->mnt_parent == mnt) {
+				br_read_unlock(vfsmount_lock);
+				return 0;
+			}
+			if (mnt->mnt_parent == path2->mnt)
+				break;
+			mnt = mnt->mnt_parent;
+		}
+		dentry = mnt->mnt_mountpoint;
+	}
+	res = is_subdir(dentry, path2->dentry);
+	br_read_unlock(vfsmount_lock);
+	return res;
+}
+EXPORT_SYMBOL(path_is_under);
 
 void d_genocide(struct dentry *root)
 {
